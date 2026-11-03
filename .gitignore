@@ -1,0 +1,20 @@
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Data
+data/
+
+# Secrets
+.env
+
+# Local databases
+*.duckdb
+*.duckdb.wal
+
+# Temporary files
+*.log
+*.part
