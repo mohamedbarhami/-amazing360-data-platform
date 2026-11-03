@@ -18,3 +18,6 @@ data/
 # Temporary files
 *.log
 *.part
+
+infra/airflow/.env
+infra/airflow/logs/
