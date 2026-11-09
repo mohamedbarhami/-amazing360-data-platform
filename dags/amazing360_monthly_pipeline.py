@@ -130,6 +130,27 @@ def amazing360_monthly_pipeline():
             "--full",
         )
         return month
+    
+    @task
+    def audit_duplicates(month):
+        print(
+            f"Analyse des doublons candidats : {month}",
+            flush=True
+        )
+
+        run_script(
+            "src/processing/audit_duplicates.py",
+            "--month",
+            month,
+        )
+
+        print(
+            "Audit des doublons termine avec succes.",
+            flush=True
+        )
+
+        return month
+
 
     @task
     def publish_summary(month):
@@ -172,9 +193,16 @@ def amazing360_monthly_pipeline():
     downloaded = download_data(month)
     bronze_validated = validate_bronze(downloaded)
     audited = audit_bronze(bronze_validated)
+    
     converted = bronze_to_silver(audited)
     silver_validated = validate_silver(converted)
-    publish_summary(silver_validated)
+
+    duplicates_audited = audit_duplicates(
+        silver_validated
+    )
+
+    publish_summary(duplicates_audited)
+
 
 
 amazing360_monthly_pipeline()
