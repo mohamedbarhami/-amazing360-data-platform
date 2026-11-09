@@ -5,112 +5,176 @@ import sys
 from pathlib import Path
 
 import pendulum
-from airflow.sdk import dag, task
+from airflow.sdk import dag, task, Param, get_current_context
 
 
 ROOT = Path("/opt/airflow/project")
 MANIFESTS = ROOT / "data/manifests"
 
-SILVER = ROOT / "data/silver/events/2019-Oct.parquet"
+MONTHS = [
+    "2019-Oct",
+    "2019-Nov",
+    "2019-Dec",
+    "2020-Jan",
+    "2020-Feb",
+    "2020-Mar",
+    "2020-Apr",
+]
 
-VALIDATION_SCRIPT = (
-    ROOT / "src/processing/validate_silver.py"
-)
 
-VALIDATION_REPORT = (
-    MANIFESTS / "2019-Oct.silver_validation.json"
-)
+def run_script(relative_path, *arguments):
+    """Execute un script existant et remonte les erreurs."""
+
+    script = ROOT / relative_path
+
+    if not script.is_file():
+        raise FileNotFoundError(script)
+
+    command = [
+        sys.executable,
+        str(script),
+        *arguments,
+    ]
+
+    print("Execution :", command, flush=True)
+
+    subprocess.run(
+        command,
+        cwd=str(ROOT),
+        check=True,
+    )
 
 
 @dag(
     dag_id="amazing360_monthly_pipeline",
-    description="Amazing 360 - Premier pipeline orchestre pour octobre",
+    description="Pipeline mensuel REES46 Bronze Silver Quality",
     start_date=pendulum.datetime(2026, 11, 1, tz="UTC"),
     schedule=None,
     catchup=False,
     max_active_runs=1,
-    tags=["amazing360", "data-engineering", "silver"],
+    default_args={"retries": 0},
+    params={
+        "month": Param(
+            "2019-Oct",
+            type="string",
+            enum=MONTHS,
+            description="Mois REES46 à traiter",
+        )
+    },
+    tags=["amazing360", "bronze", "silver", "quality"],
 )
 def amazing360_monthly_pipeline():
 
     @task
-    def check_inputs():
-        required = [
-            SILVER,
-            VALIDATION_SCRIPT,
-            MANIFESTS / "2019-Oct.audit.json",
-            MANIFESTS / "2019-Oct.quality.json",
-            MANIFESTS / "2019-Oct.zero_prices.json",
-        ]
+    def select_month():
+        month = get_current_context()["params"]["month"]
 
-        for path in required:
-            if not path.is_file():
-                raise FileNotFoundError(path)
+        if month not in MONTHS:
+            raise ValueError(f"Mois non autorise : {month}")
 
-            print(f"OK : {path.name}")
-
-        print("Toutes les entrees sont disponibles.")
-
-        return str(ROOT)
+        print(f"Mois selectionne : {month}")
+        return month
 
     @task
-    def run_silver_validation(project_root):
-        script = Path(project_root) / (
-            "src/processing/validate_silver.py"
+    def download_data(month):
+        # Ce script utilise un argument positionnel.
+        run_script(
+            "src/ingestion/download_month.py",
+            month,
         )
-
-        print("Execution de la validation Silver...", flush=True)
-
-        subprocess.run(
-            [sys.executable, str(script), "--full"],
-            cwd=project_root,
-            check=True,
-        )
-
-        print("Script termine avec succes.", flush=True)
-
-        return str(VALIDATION_REPORT)
+        return month
 
     @task
-    def publish_quality_summary(report_path):
-        path = Path(report_path)
+    def validate_bronze(month):
+        run_script(
+            "src/ingestion/validate_source.py",
+            "--month",
+            month,
+        )
+        return month
 
-        if not path.is_file():
-            raise FileNotFoundError(path)
+    @task
+    def audit_bronze(month):
+        report = MANIFESTS / f"{month}.audit.json"
+
+        arguments = ["--month", month]
+
+        if report.exists():
+            print("Audit deja present : comparaison.")
+            arguments.append("--check")
+        else:
+            print("Nouvel audit Bronze.")
+
+        run_script(
+            "src/processing/audit_bronze.py",
+            *arguments,
+        )
+        return month
+
+    @task
+    def bronze_to_silver(month):
+        run_script(
+            "src/processing/bronze_to_silver.py",
+            "--month",
+            month,
+            "--full",
+        )
+        return month
+
+    @task
+    def validate_silver(month):
+        run_script(
+            "src/processing/validate_silver.py",
+            "--month",
+            month,
+            "--full",
+        )
+        return month
+
+    @task
+    def publish_summary(month):
+        report_path = (
+            MANIFESTS / f"{month}.silver_validation.json"
+        )
+
+        if not report_path.is_file():
+            raise FileNotFoundError(report_path)
 
         report = json.loads(
-            path.read_text(encoding="utf-8")
+            report_path.read_text(encoding="utf-8")
         )
 
         checks = report["checks"]
 
-        if report["status"] != "PASS":
-            raise RuntimeError("Audit Silver non conforme")
-
-        if len(checks) != 17 or not all(checks.values()):
+        if (
+            report["status"] != "PASS"
+            or len(checks) != 17
+            or not all(checks.values())
+        ):
             raise RuntimeError(
-                "Un ou plusieurs controles ont echoue"
+                "Validation qualite incomplete ou echouee"
             )
 
-        print("=" * 50)
-        print("AMAZING 360 - PIPELINE QUALITY SUMMARY")
-        print("=" * 50)
-
-        print("Mois :", report["month"])
-
+        print("=" * 55)
+        print("AMAZING 360 - MONTHLY PIPELINE SUMMARY")
+        print("=" * 55)
+        print("Mois :", month)
         print(
             "Evenements :",
             f"{report['results']['total_events']:,}"
         )
+        print("Controles :", len(checks), "/ 17")
+        print("Statut : PASS")
+        print("PIPELINE TERMINE AVEC SUCCES !")
 
-        print("Controles reussis :", len(checks), "/ 17")
-        print("Statut :", report["status"])
+    month = select_month()
 
-        print("\nPIPELINE EXECUTE AVEC SUCCES !")
-
-    project_root = check_inputs()
-    report_path = run_silver_validation(project_root)
-    publish_quality_summary(report_path)
+    downloaded = download_data(month)
+    bronze_validated = validate_bronze(downloaded)
+    audited = audit_bronze(bronze_validated)
+    converted = bronze_to_silver(audited)
+    silver_validated = validate_silver(converted)
+    publish_summary(silver_validated)
 
 
 amazing360_monthly_pipeline()

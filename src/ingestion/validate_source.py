@@ -1,87 +1,112 @@
 
 from pathlib import Path
+import argparse
 import hashlib
 import gzip
 import json
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 
-FILE = ROOT / "data/bronze/2019-Oct.csv.gz"
-MANIFEST = ROOT / "data/manifests/2019-Oct.json"
+BRONZE = ROOT / "data/bronze"
+MANIFESTS = ROOT / "data/manifests"
+
+MONTHS = [
+    "2019-Oct",
+    "2019-Nov",
+    "2019-Dec",
+    "2020-Jan",
+    "2020-Feb",
+    "2020-Mar",
+    "2020-Apr",
+]
 
 CHUNK_SIZE = 8 * 1024 * 1024
 
 
-def validate_source():
-    print("=" * 50)
+def validate_source(month):
+    source = BRONZE / f"{month}.csv.gz"
+    manifest = MANIFESTS / f"{month}.json"
+    report_path = MANIFESTS / f"{month}.validation.json"
+
+    print("=" * 55)
     print("AMAZING 360 - SOURCE VALIDATION")
-    print("=" * 50)
+    print("=" * 55)
+    print(f"Mois : {month}")
 
-    if not FILE.exists():
-        raise FileNotFoundError(FILE)
+    if not source.is_file():
+        raise FileNotFoundError(source)
 
-    if not MANIFEST.exists():
-        raise FileNotFoundError(MANIFEST)
+    if not manifest.is_file():
+        raise FileNotFoundError(manifest)
 
     metadata = json.loads(
-        MANIFEST.read_text(encoding="utf-8")
+        manifest.read_text(encoding="utf-8")
     )
 
-    print("\n1. Verification du SHA-256")
+    if metadata["filename"] != source.name:
+        raise ValueError("Nom du fichier incorrect")
+
+    start = time.perf_counter()
+
+    print("\n1. Verification SHA-256")
 
     checksum = hashlib.sha256()
-    size = 0
+    compressed_bytes = 0
 
-    with FILE.open("rb") as f:
-        while chunk := f.read(CHUNK_SIZE):
+    with source.open("rb") as file:
+        while chunk := file.read(CHUNK_SIZE):
             checksum.update(chunk)
-            size += len(chunk)
+            compressed_bytes += len(chunk)
 
-    assert size == metadata["size_bytes"], (
-        "Taille differente du manifeste"
-    )
+    if compressed_bytes != metadata["size_bytes"]:
+        raise ValueError("Taille du fichier incorrecte")
 
-    assert checksum.hexdigest() == metadata["sha256"], (
-        "SHA-256 different du manifeste"
-    )
+    if checksum.hexdigest() != metadata["sha256"]:
+        raise ValueError("SHA-256 incorrect")
 
     print("OK : Taille et SHA-256 verifies")
 
-    print("\n2. Verification complete GZIP")
+    print("\n2. Verification GZIP")
 
-    total_uncompressed = 0
+    uncompressed_bytes = 0
 
-    # Lecture complete sans extraction sur disque
-    with gzip.open(FILE, "rb") as f:
-        while chunk := f.read(CHUNK_SIZE):
-            total_uncompressed += len(chunk)
+    with gzip.open(source, "rb") as file:
+        while chunk := file.read(CHUNK_SIZE):
+            uncompressed_bytes += len(chunk)
 
     print("OK : GZIP entierement lisible")
-    print(
-        f"Volume decompresse : "
-        f"{total_uncompressed / 1024**3:.2f} Gio"
-    )
 
     report = {
-        "file": FILE.name,
+        "month": month,
+        "file": source.name,
         "sha256_valid": True,
         "gzip_valid": True,
-        "compressed_bytes": size,
-        "uncompressed_bytes": total_uncompressed
+        "compressed_bytes": compressed_bytes,
+        "uncompressed_bytes": uncompressed_bytes,
+        "execution_seconds": round(
+            time.perf_counter() - start, 2
+        )
     }
 
-    output = (
-        ROOT / "data/manifests/"
-        "2019-Oct.validation.json"
-    )
-
-    output.write_text(
+    report_path.write_text(
         json.dumps(report, indent=4),
         encoding="utf-8"
     )
 
     print("\nVALIDATION TERMINEE !")
+    print(f"Rapport : {report_path}")
 
 
 if __name__ == "__main__":
-    validate_source()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--month",
+        choices=MONTHS,
+        default="2019-Oct"
+    )
+
+    args = parser.parse_args()
+
+    validate_source(args.month)
